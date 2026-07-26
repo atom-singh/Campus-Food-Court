@@ -1,0 +1,181 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  EMPLOYEE
+  OUTLET_MANAGER
+  KITCHEN_STAFF
+  CAMPUS_ADMIN
+}
+
+enum SlotType {
+  BREAKFAST
+  LUNCH
+  DINNER
+  SNACKS
+}
+
+enum FulfillmentType {
+  PICKUP
+  DINE_IN
+  DESK_DELIVERY
+  DELIVERY_POINT
+}
+
+enum OrderStatus {
+  PLACED
+  ACCEPTED
+  REJECTED
+  PREPARING
+  READY
+  HANDED_OVER
+  COMPLETED
+  CANCELLED
+}
+
+model Campus {
+  id        String   @id @default(cuid())
+  name      String
+  location  String
+  createdAt DateTime @default(now())
+
+  outlets Outlet[]
+  users   User[]
+}
+
+model User {
+  id        String   @id @default(cuid())
+  name      String
+  email     String   @unique
+  role      Role
+  campusId  String
+  campus    Campus   @relation(fields: [campusId], references: [id])
+  outletId  String?
+  outlet    Outlet?  @relation(fields: [outletId], references: [id])
+  createdAt DateTime @default(now())
+
+  orders Order[]
+}
+
+model Outlet {
+  id           String   @id @default(cuid())
+  campusId     String
+  campus       Campus   @relation(fields: [campusId], references: [id])
+  name         String
+  cuisineTags  String // comma separated
+  isOpen       Boolean  @default(true)
+  isPaused     Boolean  @default(false)
+  pauseReason  String?
+  openTime     String   @default("07:00")
+  closeTime    String   @default("21:00")
+  maxConcurrentOrders Int @default(20)
+  createdAt    DateTime @default(now())
+
+  staff        User[]
+  mealSlots    MealSlot[]
+  categories   MenuCategory[]
+  items        MenuItem[]
+  orders       Order[]
+}
+
+model MealSlot {
+  id        String   @id @default(cuid())
+  outletId  String
+  outlet    Outlet   @relation(fields: [outletId], references: [id])
+  type      SlotType
+  startTime String
+  endTime   String
+  isActive  Boolean  @default(true)
+  capacity  Int      @default(50)
+
+  items     MenuItem[] @relation("ItemSlots")
+
+  @@unique([outletId, type])
+}
+
+model MenuCategory {
+  id        String   @id @default(cuid())
+  outletId  String
+  outlet    Outlet   @relation(fields: [outletId], references: [id])
+  name      String
+  sortOrder Int      @default(0)
+
+  items MenuItem[]
+}
+
+model MenuItem {
+  id           String   @id @default(cuid())
+  outletId     String
+  outlet       Outlet   @relation(fields: [outletId], references: [id])
+  categoryId   String
+  category     MenuCategory @relation(fields: [categoryId], references: [id])
+  name         String
+  description  String   @default("")
+  price        Float
+  isVeg        Boolean  @default(true)
+  allergenTags String   @default("")
+  isPublished  Boolean  @default(true)
+  isSoldOut    Boolean  @default(false)
+  imageEmoji   String   @default("🍽️")
+  createdAt    DateTime @default(now())
+
+  slots     MealSlot[] @relation("ItemSlots")
+  addOns    AddOn[]
+  orderItems OrderItem[]
+}
+
+model AddOn {
+  id         String   @id @default(cuid())
+  menuItemId String
+  menuItem   MenuItem @relation(fields: [menuItemId], references: [id])
+  name       String
+  price      Float
+}
+
+model Order {
+  id              String          @id @default(cuid())
+  outletId        String
+  outlet          Outlet          @relation(fields: [outletId], references: [id])
+  employeeId      String
+  employee        User            @relation(fields: [employeeId], references: [id])
+  fulfillmentType FulfillmentType
+  slotType        SlotType
+  desiredTime     String
+  status          OrderStatus     @default(PLACED)
+  etaMinutes      Int             @default(15)
+  totalAmount     Float
+  rejectReason    String?
+  notes           String          @default("")
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  items         OrderItem[]
+  statusEvents  OrderStatusEvent[]
+}
+
+model OrderItem {
+  id         String   @id @default(cuid())
+  orderId    String
+  order      Order    @relation(fields: [orderId], references: [id])
+  menuItemId String
+  menuItem   MenuItem @relation(fields: [menuItemId], references: [id])
+  nameSnapshot  String
+  priceSnapshot Float
+  quantity   Int
+  addOnsSnapshot String @default("")
+}
+
+model OrderStatusEvent {
+  id        String      @id @default(cuid())
+  orderId   String
+  order     Order       @relation(fields: [orderId], references: [id])
+  status    OrderStatus
+  note      String      @default("")
+  createdAt DateTime    @default(now())
+}
