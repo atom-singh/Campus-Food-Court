@@ -1,18 +1,34 @@
 import { cookies } from "next/headers";
-import { prisma } from "@/lib/prisma";
+import { db } from "@/lib/firebaseAdmin";
 
 const SESSION_COOKIE = "cfd_session_user_id";
 
-export async function getSession() {
+export type SessionUser = {
+  id: string;
+  name: string;
+  email: string;
+  role: "EMPLOYEE" | "OUTLET_MANAGER" | "KITCHEN_STAFF" | "CAMPUS_ADMIN";
+  campusId: string;
+  outletId: string | null;
+};
+
+export async function getSession(): Promise<SessionUser | null> {
   const store = await cookies();
   const userId = store.get(SESSION_COOKIE)?.value;
   if (!userId) return null;
 
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    include: { campus: true, outlet: true },
-  });
-  return user;
+  const snap = await db.collection("users").doc(userId).get();
+  if (!snap.exists) return null;
+
+  const data = snap.data()!;
+  return {
+    id: snap.id,
+    name: data.name,
+    email: data.email,
+    role: data.role,
+    campusId: data.campusId,
+    outletId: data.outletId ?? null,
+  };
 }
 
 export async function setSessionCookie(userId: string) {

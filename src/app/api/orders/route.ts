@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { db, FieldValue } from "@/lib/firebaseAdmin";
 import { getSession } from "@/lib/auth";
 import { publishEvent } from "@/lib/eventBus";
-import type { FulfillmentType, SlotType } from "@prisma/client";
+import { serializeOrder } from "@/lib/serializeOrder";
+import type { OutletDoc, MealSlotDoc, MenuItemDoc, OrderDoc } from "@/lib/firestoreTypes";
+
+const TERMINAL = ["COMPLETED", "REJECTED", "CANCELLED"];
 
 export async function GET(req: NextRequest) {
   const user = await getSession();
@@ -11,37 +14,30 @@ export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const outletId = searchParams.get("outletId");
   const mine = searchParams.get("mine");
+  const activeOnly = searchParams.get("active") === "true";
 
-  const where: Record<string, unknown> = {};
+  let query: FirebaseFirestore.Query = db.collection("orders");
   if (user.role === "EMPLOYEE" || mine === "true") {
-    where.employeeId = user.id;
+    query = query.where("employeeId", "==", user.id);
   } else if (outletId) {
-    where.outletId = outletId;
+    query = query.where("outletId", "==", outletId);
   } else if (user.outletId) {
-    where.outletId = user.outletId;
+    query = query.where("outletId", "==", user.outletId);
   } else {
-    // Campus admin with no outlet filter: all outlets in their campus
-    where.outlet = { campusId: user.campusId };
+    query = query.where("campusId", "==", user.campusId);
   }
 
-  const activeOnly = searchParams.get("active");
-  if (activeOnly === "true") {
-    where.status = { notIn: ["COMPLETED", "REJECTED", "CANCELLED"] };
+  // Sorting/filtering happens in memory rather than via orderBy/not-in so this
+  // never needs a Firestore composite index at this app's order volume.
+  const snap = await query.get();
+  let orders = snap.docs
+    .map((d) => serializeOrder(d.id, d.data() as OrderDoc))
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  if (activeOnly) {
+    orders = orders.filter((o) => !TERMINAL.includes(o.status));
   }
 
-  const orders = await prisma.order.findMany({
-    where,
-    include: {
-      items: true,
-      outlet: true,
-      employee: true,
-      statusEvents: { orderBy: { createdAt: "asc" } },
-    },
-    orderBy: { createdAt: "desc" },
-    take: 100,
-  });
-
-  return NextResponse.json({ orders });
+  return NextResponse.json({ orders: orders.slice(0, 100) });
 }
 
 export async function POST(req: NextRequest) {
@@ -53,8 +49,8 @@ export async function POST(req: NextRequest) {
   const body = await req.json();
   const { outletId, fulfillmentType, slotType, desiredTime, notes, items } = body as {
     outletId: string;
-    fulfillmentType: FulfillmentType;
-    slotType: SlotType;
+    fulfillmentType: string;
+    slotType: string;
     desiredTime: string;
     notes?: string;
     items: { menuItemId: string; quantity: number }[];
@@ -64,23 +60,21 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "outletId and items are required" }, { status: 400 });
   }
 
-  const outlet = await prisma.outlet.findUnique({
-    where: { id: outletId },
-    include: { mealSlots: true },
-  });
-  if (!outlet) return NextResponse.json({ error: "Outlet not found" }, { status: 404 });
+  const outletDoc = await db.collection("outlets").doc(outletId).get();
+  if (!outletDoc.exists) return NextResponse.json({ error: "Outlet not found" }, { status: 404 });
+  const outlet = outletDoc.data() as OutletDoc;
   if (!outlet.isOpen || outlet.isPaused) {
     return NextResponse.json({ error: "Outlet is currently not accepting orders" }, { status: 409 });
   }
 
-  const slot = outlet.mealSlots.find((s) => s.type === slotType);
+  const slotsSnap = await db.collection("mealSlots").where("outletId", "==", outletId).get();
+  const slot = slotsSnap.docs.map((s) => s.data() as MealSlotDoc).find((s) => s.type === slotType);
   if (!slot || !slot.isActive) {
     return NextResponse.json({ error: "Selected meal slot is not available" }, { status: 409 });
   }
 
-  const activeCount = await prisma.order.count({
-    where: { outletId, status: { notIn: ["COMPLETED", "REJECTED", "CANCELLED"] } },
-  });
+  const outletOrdersSnap = await db.collection("orders").where("outletId", "==", outletId).get();
+  const activeCount = outletOrdersSnap.docs.filter((d) => !TERMINAL.includes((d.data() as OrderDoc).status)).length;
   if (activeCount >= outlet.maxConcurrentOrders) {
     return NextResponse.json(
       { error: "Outlet is at capacity for this slot. Please try again shortly." },
@@ -89,10 +83,11 @@ export async function POST(req: NextRequest) {
   }
 
   const menuItemIds = items.map((i) => i.menuItemId);
-  const menuItems = await prisma.menuItem.findMany({ where: { id: { in: menuItemIds } } });
+  const menuItemDocs = await Promise.all(menuItemIds.map((id) => db.collection("menuItems").doc(id).get()));
+  const menuItems = menuItemDocs.map((d) => (d.exists ? { id: d.id, ...(d.data() as MenuItemDoc) } : null));
 
   for (const reqItem of items) {
-    const mi = menuItems.find((m) => m.id === reqItem.menuItemId);
+    const mi = menuItems.find((m) => m?.id === reqItem.menuItemId);
     if (!mi || mi.isSoldOut || !mi.isPublished || mi.outletId !== outletId) {
       return NextResponse.json(
         { error: `Item "${mi?.name ?? reqItem.menuItemId}" is no longer available` },
@@ -102,40 +97,48 @@ export async function POST(req: NextRequest) {
   }
 
   const totalAmount = items.reduce((sum, reqItem) => {
-    const mi = menuItems.find((m) => m.id === reqItem.menuItemId)!;
+    const mi = menuItems.find((m) => m?.id === reqItem.menuItemId)!;
     return sum + mi.price * reqItem.quantity;
   }, 0);
 
-  const order = await prisma.order.create({
-    data: {
-      outletId,
-      employeeId: user.id,
-      fulfillmentType,
-      slotType,
-      desiredTime: desiredTime ?? "",
-      notes: notes ?? "",
-      totalAmount,
-      status: "PLACED",
-      items: {
-        create: items.map((reqItem) => {
-          const mi = menuItems.find((m) => m.id === reqItem.menuItemId)!;
-          return {
-            menuItemId: mi.id,
-            nameSnapshot: mi.name,
-            priceSnapshot: mi.price,
-            quantity: reqItem.quantity,
-          };
-        }),
-      },
-      statusEvents: { create: { status: "PLACED", note: "Order placed by employee" } },
-    },
-    include: { items: true, outlet: true, employee: true, statusEvents: true },
-  });
+  const now = FieldValue.serverTimestamp();
+  const orderData = {
+    outletId,
+    campusId: outlet.campusId,
+    outletName: outlet.name,
+    employeeId: user.id,
+    employeeName: user.name,
+    fulfillmentType,
+    slotType,
+    desiredTime: desiredTime ?? "",
+    status: "PLACED",
+    etaMinutes: 15,
+    totalAmount,
+    rejectReason: null,
+    notes: notes ?? "",
+    items: items.map((reqItem) => {
+      const mi = menuItems.find((m) => m?.id === reqItem.menuItemId)!;
+      return {
+        menuItemId: mi.id,
+        nameSnapshot: mi.name,
+        priceSnapshot: mi.price,
+        quantity: reqItem.quantity,
+        addOnsSnapshot: "",
+      };
+    }),
+    statusEvents: [{ status: "PLACED", note: "Order placed by employee", createdAt: new Date().toISOString() }],
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const ref = await db.collection("orders").add(orderData);
+  const created = await ref.get();
+  const order = serializeOrder(ref.id, created.data() as OrderDoc);
 
   publishEvent({
     type: "order.placed",
     campusId: outlet.campusId,
-    outletId: outlet.id,
+    outletId,
     employeeId: user.id,
     payload: { order },
   });

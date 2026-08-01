@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { db } from "@/lib/firebaseAdmin";
 import { getSession } from "@/lib/auth";
 import { publishEvent } from "@/lib/eventBus";
+import type { MealSlotDoc, OutletDoc } from "@/lib/firestoreTypes";
 
 export async function PATCH(
   req: NextRequest,
@@ -19,16 +20,15 @@ export async function PATCH(
     if (key in body) allowed[key] = body[key];
   }
 
-  const slot = await prisma.mealSlot.update({
-    where: { id: slotId },
-    data: allowed,
-  });
+  const ref = db.collection("mealSlots").doc(slotId);
+  await ref.update(allowed);
+  const slot = { id: slotId, ...((await ref.get()).data() as MealSlotDoc) };
 
-  const outlet = await prisma.outlet.findUnique({ where: { id } });
-  if (outlet) {
+  const outletDoc = await db.collection("outlets").doc(id).get();
+  if (outletDoc.exists) {
     publishEvent({
       type: "meal_slot.toggled",
-      campusId: outlet.campusId,
+      campusId: (outletDoc.data() as OutletDoc).campusId,
       outletId: id,
       payload: { slotId: slot.id, type: slot.type, isActive: slot.isActive },
     });

@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { db, FieldValue } from "@/lib/firebaseAdmin";
 import { getSession } from "@/lib/auth";
 import { publishEvent } from "@/lib/eventBus";
 import { NEXT_STATUS } from "@/lib/types";
+import { serializeOrder } from "@/lib/serializeOrder";
+import type { OrderDoc } from "@/lib/firestoreTypes";
 
 export async function PATCH(
   req: NextRequest,
@@ -16,8 +18,10 @@ export async function PATCH(
   const { id } = await params;
   const { status, reason, etaMinutes } = await req.json();
 
-  const order = await prisma.order.findUnique({ where: { id }, include: { outlet: true } });
-  if (!order) return NextResponse.json({ error: "Order not found" }, { status: 404 });
+  const ref = db.collection("orders").doc(id);
+  const snap = await ref.get();
+  if (!snap.exists) return NextResponse.json({ error: "Order not found" }, { status: 404 });
+  const order = snap.data() as OrderDoc;
 
   if (user.role !== "CAMPUS_ADMIN" && user.outletId !== order.outletId) {
     return NextResponse.json({ error: "Not your outlet" }, { status: 403 });
@@ -32,25 +36,29 @@ export async function PATCH(
     );
   }
 
-  const updated = await prisma.order.update({
-    where: { id },
-    data: {
-      status,
-      rejectReason: status === "REJECTED" ? reason ?? "" : order.rejectReason,
-      etaMinutes: etaMinutes ?? order.etaMinutes,
-      statusEvents: {
-        create: {
-          status,
-          note: isDelayOnly ? `Delayed — new ETA ${etaMinutes ?? order.etaMinutes} min${reason ? `: ${reason}` : ""}` : reason ?? "",
-        },
-      },
-    },
-    include: { items: true, outlet: true, employee: true, statusEvents: { orderBy: { createdAt: "asc" } } },
+  const nextEtaMinutes = etaMinutes ?? order.etaMinutes;
+  const newEvent = {
+    status,
+    note: isDelayOnly
+      ? `Delayed — new ETA ${nextEtaMinutes} min${reason ? `: ${reason}` : ""}`
+      : reason ?? "",
+    createdAt: new Date().toISOString(),
+  };
+
+  await ref.update({
+    status,
+    rejectReason: status === "REJECTED" ? reason ?? "" : order.rejectReason,
+    etaMinutes: nextEtaMinutes,
+    statusEvents: FieldValue.arrayUnion(newEvent),
+    updatedAt: FieldValue.serverTimestamp(),
   });
+
+  const updatedSnap = await ref.get();
+  const updated = serializeOrder(id, updatedSnap.data() as OrderDoc);
 
   publishEvent({
     type: "order.status_changed",
-    campusId: order.outlet.campusId,
+    campusId: order.campusId,
     outletId: order.outletId,
     employeeId: order.employeeId,
     payload: { order: updated },

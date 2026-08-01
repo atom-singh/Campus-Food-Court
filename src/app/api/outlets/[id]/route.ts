@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { db } from "@/lib/firebaseAdmin";
 import { getSession } from "@/lib/auth";
 import { publishEvent } from "@/lib/eventBus";
+import type { OutletDoc, MealSlotDoc, MenuCategoryDoc, MenuItemDoc } from "@/lib/firestoreTypes";
 
 export async function GET(
   _req: NextRequest,
@@ -11,22 +12,46 @@ export async function GET(
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { id } = await params;
 
-  const outlet = await prisma.outlet.findUnique({
-    where: { id },
-    include: {
-      mealSlots: true,
-      categories: {
-        orderBy: { sortOrder: "asc" },
-        include: {
-          items: {
-            include: { addOns: true, slots: true },
-          },
-        },
-      },
-    },
+  const outletDoc = await db.collection("outlets").doc(id).get();
+  if (!outletDoc.exists) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+  const [slotsSnap, categoriesSnap, itemsSnap] = await Promise.all([
+    db.collection("mealSlots").where("outletId", "==", id).get(),
+    db.collection("menuCategories").where("outletId", "==", id).get(),
+    db.collection("menuItems").where("outletId", "==", id).get(),
+  ]);
+
+  const mealSlots = slotsSnap.docs.map((s) => ({ id: s.id, ...(s.data() as MealSlotDoc) }));
+  const slotById = new Map(mealSlots.map((s) => [s.id, s]));
+
+  const items = itemsSnap.docs.map((d) => {
+    const data = d.data() as MenuItemDoc;
+    const slotIds = data.slotIds ?? [];
+    return {
+      id: d.id,
+      ...data,
+      slots: slotIds
+        .map((sid) => slotById.get(sid))
+        .filter((s): s is NonNullable<typeof s> => Boolean(s))
+        .map((s) => ({ id: s.id, type: s.type })),
+    };
   });
 
-  if (!outlet) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  const categories = categoriesSnap.docs
+    .map((c) => ({ id: c.id, ...(c.data() as MenuCategoryDoc) }))
+    .sort((a, b) => a.sortOrder - b.sortOrder)
+    .map((c) => ({
+      ...c,
+      items: items.filter((i) => i.categoryId === c.id),
+    }));
+
+  const outlet = {
+    id: outletDoc.id,
+    ...(outletDoc.data() as OutletDoc),
+    mealSlots,
+    categories,
+  };
+
   return NextResponse.json({ outlet });
 }
 
@@ -54,7 +79,9 @@ export async function PATCH(
     if (key in body) allowed[key] = body[key];
   }
 
-  const outlet = await prisma.outlet.update({ where: { id }, data: allowed });
+  const ref = db.collection("outlets").doc(id);
+  await ref.update(allowed);
+  const outlet = { id, ...((await ref.get()).data() as OutletDoc) };
 
   publishEvent({
     type: "outlet.status_changed",

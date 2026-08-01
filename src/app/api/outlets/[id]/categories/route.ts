@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { db } from "@/lib/firebaseAdmin";
 import { getSession } from "@/lib/auth";
 
 export async function POST(
@@ -14,10 +14,10 @@ export async function POST(
   const { name } = await req.json();
   if (!name) return NextResponse.json({ error: "name is required" }, { status: 400 });
 
-  const count = await prisma.menuCategory.count({ where: { outletId: id } });
-  const category = await prisma.menuCategory.create({
-    data: { outletId: id, name, sortOrder: count },
-  });
+  const countSnap = await db.collection("menuCategories").where("outletId", "==", id).count().get();
+  const data = { outletId: id, name, sortOrder: countSnap.data().count };
+  const ref = await db.collection("menuCategories").add(data);
+  const category = { id: ref.id, ...data };
 
   return NextResponse.json({ category }, { status: 201 });
 }

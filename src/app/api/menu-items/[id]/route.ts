@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { db } from "@/lib/firebaseAdmin";
 import { getSession } from "@/lib/auth";
 import { publishEvent } from "@/lib/eventBus";
+import type { MenuItemDoc, OutletDoc } from "@/lib/firestoreTypes";
 
 export async function PATCH(
   req: NextRequest,
@@ -25,12 +26,14 @@ export async function PATCH(
     }
   }
 
-  const item = await prisma.menuItem.update({ where: { id }, data: allowed });
-  const outlet = await prisma.outlet.findUnique({ where: { id: item.outletId } });
+  const ref = db.collection("menuItems").doc(id);
+  await ref.update(allowed);
+  const item = { id, ...((await ref.get()).data() as MenuItemDoc) };
+  const outletDoc = await db.collection("outlets").doc(item.outletId).get();
 
   publishEvent({
     type: "menu_item.availability_changed",
-    campusId: outlet?.campusId ?? "",
+    campusId: outletDoc.exists ? (outletDoc.data() as OutletDoc).campusId : "",
     outletId: item.outletId,
     payload: { itemId: item.id, isSoldOut: item.isSoldOut, isPublished: item.isPublished, price: item.price },
   });
@@ -47,16 +50,17 @@ export async function DELETE(
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
   const { id } = await params;
-  const item = await prisma.menuItem.findUnique({ where: { id } });
-  if (!item) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  const ref = db.collection("menuItems").doc(id);
+  const snap = await ref.get();
+  if (!snap.exists) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  const outlet = await prisma.outlet.findUnique({ where: { id: item.outletId } });
-  await prisma.addOn.deleteMany({ where: { menuItemId: id } });
-  await prisma.menuItem.delete({ where: { id } });
+  const item = snap.data()!;
+  const outletDoc = await db.collection("outlets").doc(item.outletId).get();
+  await ref.delete();
 
   publishEvent({
     type: "menu_item.updated",
-    campusId: outlet?.campusId ?? "",
+    campusId: outletDoc.exists ? outletDoc.data()!.campusId : "",
     outletId: item.outletId,
     payload: { itemId: id, action: "deleted" },
   });

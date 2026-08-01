@@ -1,7 +1,8 @@
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import NavBar from "@/components/NavBar";
-import { prisma } from "@/lib/prisma";
+import { db } from "@/lib/firebaseAdmin";
+import type { OutletDoc } from "@/lib/firestoreTypes";
 import OutletStatusBar from "./OutletStatusBar";
 
 export default async function VendorLayout({
@@ -14,8 +15,9 @@ export default async function VendorLayout({
   if (!["OUTLET_MANAGER", "KITCHEN_STAFF"].includes(user.role)) redirect("/");
   if (!user.outletId) redirect("/login");
 
-  const outlet = await prisma.outlet.findUnique({ where: { id: user.outletId } });
-  if (!outlet) redirect("/login");
+  const outletDoc = await db.collection("outlets").doc(user.outletId).get();
+  if (!outletDoc.exists) redirect("/login");
+  const outlet = { id: outletDoc.id, ...(outletDoc.data() as OutletDoc) };
 
   const links = [{ href: "/vendor", label: "Live Orders" }];
   if (user.role === "OUTLET_MANAGER") {

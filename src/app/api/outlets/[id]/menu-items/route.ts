@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { db } from "@/lib/firebaseAdmin";
 import { getSession } from "@/lib/auth";
 import { publishEvent } from "@/lib/eventBus";
 
@@ -19,26 +19,39 @@ export async function POST(
     return NextResponse.json({ error: "categoryId, name, price are required" }, { status: 400 });
   }
 
-  const item = await prisma.menuItem.create({
-    data: {
-      outletId: id,
-      categoryId,
-      name,
-      description: description ?? "",
-      price: Number(price),
-      isVeg: isVeg ?? true,
-      imageEmoji: imageEmoji ?? "🍽️",
-      isPublished: true,
-      slots: slotIds?.length ? { connect: slotIds.map((sid: string) => ({ id: sid })) } : undefined,
-    },
-    include: { slots: true, addOns: true },
-  });
+  const data = {
+    outletId: id,
+    categoryId,
+    name,
+    description: description ?? "",
+    price: Number(price),
+    isVeg: isVeg ?? true,
+    allergenTags: "",
+    isPublished: true,
+    isSoldOut: false,
+    imageEmoji: imageEmoji ?? "🍽️",
+    slotIds: slotIds ?? [],
+    addOns: [],
+    createdAt: new Date().toISOString(),
+  };
+  const ref = await db.collection("menuItems").add(data);
 
-  const outlet = await prisma.outlet.findUnique({ where: { id } });
-  if (outlet) {
+  const slotsSnap = slotIds?.length
+    ? await db.collection("mealSlots").where("outletId", "==", id).get()
+    : null;
+  const slots = slotsSnap
+    ? slotsSnap.docs
+        .filter((s) => slotIds.includes(s.id))
+        .map((s) => ({ id: s.id, type: s.data().type }))
+    : [];
+
+  const item = { id: ref.id, ...data, slots };
+
+  const outletDoc = await db.collection("outlets").doc(id).get();
+  if (outletDoc.exists) {
     publishEvent({
       type: "menu_item.updated",
-      campusId: outlet.campusId,
+      campusId: outletDoc.data()!.campusId,
       outletId: id,
       payload: { itemId: item.id, action: "created" },
     });

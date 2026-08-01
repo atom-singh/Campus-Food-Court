@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { db } from "@/lib/firebaseAdmin";
 import { getSession } from "@/lib/auth";
 
 export async function GET(
@@ -12,10 +12,8 @@ export async function GET(
   }
   const { id } = await params;
 
-  const orders = await prisma.order.findMany({
-    where: { outletId: id },
-    include: { items: true },
-  });
+  const ordersSnap = await db.collection("orders").where("outletId", "==", id).get();
+  const orders = ordersSnap.docs.map((d) => d.data());
 
   const completed = orders.filter((o) => o.status === "COMPLETED");
   const cancelledOrRejected = orders.filter((o) => ["CANCELLED", "REJECTED"].includes(o.status));
@@ -31,7 +29,7 @@ export async function GET(
 
   const itemCounts = new Map<string, { name: string; qty: number; revenue: number }>();
   for (const o of completed) {
-    for (const item of o.items) {
+    for (const item of o.items ?? []) {
       const cur = itemCounts.get(item.menuItemId) ?? { name: item.nameSnapshot, qty: 0, revenue: 0 };
       cur.qty += item.quantity;
       cur.revenue += item.quantity * item.priceSnapshot;
