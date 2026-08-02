@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "app.vercel.campus_food_court_orcin.twa",
+      "sha256_cert_fingerprints": [
+        "3D:9D:C4:13:19:94:07:5D:21:46:01:18:F3:23:E7:C1:6C:33:CE:C6:24:F9:1B:30:5D:20:1B:C8:3B:F3:72:B5"
+      ]
+    }
+  }
+]
